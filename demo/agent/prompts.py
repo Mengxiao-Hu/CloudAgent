@@ -25,6 +25,9 @@ TOOLS
 - shell(command)
     Run a READ-ONLY analysis command: grep, rg, find, wc, cat, head, ls,
     and read-only git (git log, git status, git show, git diff).
+    Git commands must target the repo explicitly:
+      shell("git -C /workspace/repo log --oneline -5")
+      shell("git -C /workspace/repo show --stat HEAD")
 - finish(output)
     Return your final markdown report and stop. Call this exactly once at the end.
 
