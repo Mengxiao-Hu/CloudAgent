@@ -11,7 +11,7 @@ from app.sandbox import DockerSandbox
 
 logger = logging.getLogger(__name__)
 
-_TASK_TIMEOUT_SECONDS = 660  # 11 minutes: up to 3 min clone + 8 min agent loop
+_TASK_TIMEOUT_SECONDS = 660  # 11 min wall-clock: 10 min agent budget + 1 min buffer
 
 
 def _utcnow() -> datetime:
@@ -70,21 +70,10 @@ def worker_loop(
 
             # ----------------------------------------------------------
             # Initialise workspace
+            # Repo is mounted from named volume (pre-cloned once by sandbox).
             # ----------------------------------------------------------
-            task.thought = "Cloning vllm repository (this may take 1-2 minutes)..."
-            clone_result = sandbox.exec(
-                "git clone --depth 1 https://github.com/vllm-project/vllm /workspace/repo",
-                timeout=120,
-            )
-            if clone_result["returncode"] != 0:
-                logger.warning(
-                    "git clone exited %d: %s",
-                    clone_result["returncode"],
-                    clone_result["stdout"],
-                )
-
             sandbox.exec("mkdir -p /workspace/out", timeout=10)
-            task.thought = "Repository ready. Starting agent loop..."
+            task.thought = "Sandbox ready. Starting agent loop..."
 
             # ----------------------------------------------------------
             # Run agent (with per-task timeout)
@@ -125,9 +114,11 @@ def _run_with_timeout(run_agent, task, sandbox, llm, timeout: int) -> dict:
     """
     Execute ``run_agent(task, sandbox, llm)`` with a hard wall-clock timeout.
 
-    ``run_agent`` may be a coroutine function (async def).  We detect that
-    and run it in a fresh event loop on a secondary thread so we can apply
-    a threading-level timeout regardless.
+    ``run_agent`` is async, so it runs in a fresh event loop on a secondary
+    thread. Two timeouts work in concert: asyncio.wait_for cancels the
+    coroutine cooperatively; thread.join(timeout) is the hard wall-clock
+    backstop in case the coroutine is blocked in a non-cooperative call
+    (e.g. a Docker exec that ignores cancellation).
     """
     result_holder: list[dict] = []
     exc_holder: list[Exception] = []

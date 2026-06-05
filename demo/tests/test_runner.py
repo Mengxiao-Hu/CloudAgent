@@ -10,6 +10,7 @@ Bug 3: Iteration stays 0 / thought+plan not updated — _update_progress called
 import asyncio
 import sys
 import os
+import time
 
 # Ensure the demo package root is on sys.path so `from agent.runner import ...`
 # resolves correctly when pytest is invoked from /root/CloudAgent/demo/.
@@ -17,7 +18,8 @@ _DEMO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _DEMO_ROOT not in sys.path:
     sys.path.insert(0, _DEMO_ROOT)
 
-from agent.runner import _trim_history, run_agent
+from agent.runner import _trim_history, run_agent, guard_budget, BudgetExceeded, TASK_TIME_LIMIT_SECONDS
+from agent.tools import ShellTool
 
 
 # ---------------------------------------------------------------------------
@@ -297,3 +299,75 @@ def test_history_trimmed_before_llm_call():
         assert len(out) <= 20, (
             f"_trim_history({n} items) returned {len(out)} items, expected ≤ 20"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: guard_budget raises BudgetExceeded after time limit
+# ---------------------------------------------------------------------------
+
+def test_guard_budget_raises_when_exceeded():
+    """guard_budget must raise BudgetExceeded when elapsed > TASK_TIME_LIMIT_SECONDS."""
+    task = _make_task()
+    # Simulate a start time far in the past.
+    past = time.monotonic() - (TASK_TIME_LIMIT_SECONDS + 1)
+    try:
+        guard_budget(task, past)
+        assert False, "Expected BudgetExceeded to be raised"
+    except BudgetExceeded:
+        pass
+
+
+def test_guard_budget_does_not_raise_within_limit():
+    """guard_budget must not raise when the loop just started."""
+    task = _make_task()
+    now = time.monotonic()
+    guard_budget(task, now)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Test 7: ShellTool.check allow-list
+# ---------------------------------------------------------------------------
+
+def test_shell_check_allows_rg():
+    assert ShellTool.check("rg -n 'TODO|FIXME' /workspace/repo") is None
+
+
+def test_shell_check_allows_git_log():
+    assert ShellTool.check("git -C /workspace/repo log --oneline -5") is None
+
+
+def test_shell_check_allows_git_show():
+    assert ShellTool.check("git -C /workspace/repo show --stat HEAD") is None
+
+
+def test_shell_check_rejects_git_push():
+    reason = ShellTool.check("git push origin master")
+    assert reason is not None
+    assert "not supported" in reason.lower()
+
+
+def test_shell_check_rejects_pip_install():
+    reason = ShellTool.check("pip install requests")
+    assert reason is not None
+
+
+def test_shell_check_rejects_curl():
+    reason = ShellTool.check("curl https://example.com")
+    assert reason is not None
+
+
+def test_shell_check_rejects_unknown_head():
+    reason = ShellTool.check("python3 script.py")
+    assert reason is not None
+    assert "allow-list" in reason
+
+
+def test_shell_check_allows_quoted_pipe_in_regex():
+    # '|' inside a quoted rg pattern must NOT be treated as a pipe operator.
+    assert ShellTool.check("rg 'TODO|FIXME' /workspace/repo") is None
+
+
+def test_shell_check_rejects_git_unknown_subcommand():
+    reason = ShellTool.check("git -C /workspace/repo clone https://x.com")
+    assert reason is not None
+    assert "clone" in reason

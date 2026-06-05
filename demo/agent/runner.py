@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 
 from .prompts import system_prompt
 from .tools import ToolRegistry
@@ -33,20 +32,6 @@ def _task_prompt(task) -> str:
     if isinstance(task, dict):
         return task.get("prompt", "")
     return str(task)
-
-
-def _task_started_at(task) -> float | None:
-    """Best-effort epoch seconds for when the task started."""
-    started = getattr(task, "started_at", None)
-    if started is None and isinstance(task, dict):
-        started = task.get("started_at")
-    if started is None:
-        return None
-    if isinstance(started, datetime):
-        return started.timestamp()
-    if isinstance(started, (int, float)):
-        return float(started)
-    return None
 
 
 def guard_budget(task, start_monotonic: float) -> None:
@@ -73,20 +58,14 @@ def _trim_history(history: list[dict], max_messages: int = 20) -> list[dict]:
 
 
 def _update_progress(task, iteration: int, thought=None, plan=None) -> None:
-    try:
+    if isinstance(task, dict):
+        task["iteration"] = iteration
+        task["thought"] = thought
+        task["plan"] = plan
+    else:
         task.iteration = iteration
-        task.last_activity = datetime.now()
-    except (AttributeError, TypeError):
-        # Fakes / dicts may not support attribute assignment; non-fatal.
-        if isinstance(task, dict):
-            task["iteration"] = iteration
-    try:
         task.thought = thought
         task.plan = plan
-    except (AttributeError, TypeError):
-        if isinstance(task, dict):
-            task["thought"] = thought
-            task["plan"] = plan
 
 
 async def run_agent(task, sandbox, llm, tool_registry: ToolRegistry | None = None) -> dict:

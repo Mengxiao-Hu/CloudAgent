@@ -66,11 +66,6 @@ class TaskResponse(BaseModel):
     thought: str | None = None
     plan: str | None = None
 
-    class Config:
-        # Exclude None values from serialised output
-        # (handled manually in the endpoint for fine-grained control)
-        pass
-
 
 # ---------------------------------------------------------------------------
 # Helpers

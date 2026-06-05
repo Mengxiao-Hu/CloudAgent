@@ -272,7 +272,14 @@ class ShellTool:
                     "(grep, rg, find, wc, cat, head, ls, git log/status, ...)."
                 )
             if head == "git":
-                sub = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+                # Support `git -C <path> <subcommand>` so the agent can target
+                # /workspace/repo explicitly without changing the shell CWD.
+                # Only -C (with a path argument) is recognised before the subcommand;
+                # all other git global flags must follow the subcommand as normal.
+                sub_idx = idx + 1
+                if sub_idx < len(tokens) and tokens[sub_idx] == "-C":
+                    sub_idx += 2  # skip "-C" and its path argument
+                sub = tokens[sub_idx] if sub_idx < len(tokens) else ""
                 if sub not in cls.ALLOWED_GIT_SUB:
                     return (
                         f"git subcommand '{sub}' not allowed. Only read-only git "
