@@ -1,0 +1,119 @@
+构建一个 Cloud Agent Platform：用户提交一段自然语言任务（例如「读取这个仓库、找出所有 TODO、生成一份报告」），平台会启动一个自主 agent，在云端隔离环境中执行——调用 LLM 进行推理、调用工具（执行命令、读写文件等）、循环迭代直到完成，最后返回结果。可以类比 Claude Code Cloud / Devin / OpenAI 的 agent 运行平台。
+
+**四个重点（demo 必须能讲清楚）：**
+
+| 重点 | 8h MVP 至少要展示什么 |
+|------|----------------------|
+| Agent 编排与调度 | 提交任务 → 队列/worker → 状态可查（UI 或 API） |
+| 沙箱与隔离执行 | read/write 在 Docker 容器内执行，不是 worker 本机 |
+| LLM 集成与工具调用 | LLM 选工具 → 循环 → 最终 **summary** 报告 |
+| 整体架构与可扩展性 | `LLMProvider` / `Tool` / `Sandbox` 三个 Protocol，实现可换 |
+
+提交形式不限：可文档，可图，可代码（仓库地址）。
+
+架构参考：`skeleton.py`（思路参考，非逐行强制；落地以 `.claude/docs/` 为准）。
+
+**开发方式：** 迭代交付，非固定时段瀑布流。先打通最短路径，再补沙箱/编排/前端；时间花在 **Agent 行为** 上最多，其余尽量做薄。
+
+---
+
+## 8 小时 MVP（当前唯一交付目标）
+
+目标：**能演示四个重点**——极简前端 + API + 简化 Agent。不必一次做全 Devin 能力。
+
+### P0 — 必须实现
+
+1. **编排（薄）**
+   - `POST /tasks`、`GET /tasks/{id}`
+   - 内存队列 + 单 worker，状态：`queued` → `running` → `succeeded` | `failed`
+
+2. **沙箱（薄）**
+   - `DockerSandbox`：`create` → `exec` / `read` / `write` → `destroy`
+   - Demo：容器内 **浅克隆** 固定公开库（见 § 演示场景）
+   - **不要求**：seccomp 调优、GitHub token、push 远程
+
+3. **LLM + Agent（简单工具 + 超出能力则拒绝）**
+
+   **不限制为 3 个工具名**；实现一组**简单、常见**的沙箱内能力即可，例如：
+
+   | 类型 | 示例 | 说明 |
+   |------|------|------|
+   | 读 | `read` / `ReadFile` | 读 `/workspace/repo`（可带行范围） |
+   | 写 | `write` / `WriteFile` | 报告写到 `/workspace/out/`；**不**要求改 vllm 源码 |
+   | 命令 | `shell` / `Shell` | 仅用于分析：`rg`/`grep`/`find`/`head`/`wc`/`cat` 等；**在沙箱内**执行 |
+   | 结束 | `finish` / 最终回复 | 向用户提交 markdown 报告 |
+
+   **超出 demo 能力或过重时 — 明确拒绝**（返回给 LLM 的固定文案，勿静默失败），例如：
+   - `pip install` / `npm install` / 编译构建 vllm
+   - `git push`、开 PR、改 GitHub
+   - 访问私有库、任意用户输入的 repo URL（8h 仅支持写死的公开库）
+   - 超时长 / 超大范围读全库（应提示用 `rg TODO` 等）
+
+   - `run_agent()` 或 LangChain 包一层 `LLMProvider`；**迭代调通此循环优先**
+   - LLM 在 worker，`TOGETHER_API_KEY` 仅环境变量
+
+4. **架构（薄）**
+   - 三个 Protocol + 各一个实现；不必对齐 skeleton 每一行
+
+5. **极简前端（建议 P0）**
+   - 单页：输入 prompt → 提交 → 轮询状态 → 展示 markdown 结果
+   - 无登录、无设计系统；静态 HTML 或最小 React 均可
+   - 与 curl 验收并存
+
+6. **演示场景（无登录、无 GitHub 写权限）**
+
+   **原则：** 用户不登录；Agent **不能** push/PR；在沙箱内对**真实公开仓库**做读/搜索/分析。
+
+   **默认分析仓库（写死在 `SPECS.md`）：**
+
+   ```text
+   https://github.com/vllm-project/vllm
+   ```
+
+   - 任务开始时容器内：`git clone --depth 1` 到 `/workspace/repo`（公开、无 token）
+   - vllm 体量大：应用 **`rg 'TODO|FIXME'` / `grep -r`** 等定位，再 `read` 关键片段；不要试图读全库进上下文
+   - 备用离线测试：`fixtures/sample-repo/`（仅开发调试，非默认演示）
+
+   **禁止（8h）：** 用户自选 repo URL、私有库、push、安装依赖并编译 vllm。
+
+   **默认任务 prompt：**「Clone 已完成。在 `/workspace/repo` 中找出所有 TODO/FIXME，归纳并生成 markdown 报告。」
+
+7. **验收**
+   - 前端或 `scripts/demo.sh` 走通同一 API
+   - `ACCEPTANCE.md` 可重复执行
+
+### Preferred LLM stack
+
+- 参考：`../learn-agent/learn_LangChain/start.py`
+- LangChain + Together / `Qwen/Qwen2.5-7B-Instruct-Turbo`
+- PM 写入 `.claude/docs/SPECS.md`
+
+### P1 — 不做（除非时间有余）
+
+- SQLite/Redis、多 worker、多租户、`Plan` 持久化
+- policy 引擎、LangSmith 必开、Firecracker、K8s
+- 用户自选 repo、私有库、push/PR、在沙箱内 `pip install` 并跑通 vllm 构建
+
+### 完成标准（8h）
+
+- [ ] 四个重点各能指到代码或 demo 路径
+- [ ] 对 **vllm** 公开库完成 TODO/FIXME 类分析报告（允许经 `shell`+`read` 路径）
+- [ ] 过重请求有明确「不支持」拒绝文案
+- [ ] 极简前端或等价 UI 能提交并看到报告
+- [ ] 可选：curl `demo.sh` 仍可通过
+
+---
+
+## 迭代优先级（非排期表）
+
+按风险与演示价值交替推进，**不要**按「第 1–3 小时只做后端」执行：
+
+| 优先级 | 工作流 | 说明 |
+|--------|--------|------|
+| 1 | **Agent 薄循环** | 沙箱内 clone vllm → `rg`/read → 报告；过重操作返回 reject |
+| 2 | **API + worker** | POST/GET 接上 agent，能异步跑完一单 |
+| 3 | **Docker read/write** | 真隔离；write 可最晚 |
+| 4 | **极简前端** | 接同一 API，便于演示 |
+| 5 | **打磨** | 提示词、错误文案、`demo.sh`、README 四重点对照 |
+
+Agent 与集成问题会反复占时间——预期内。编排/前端保持最薄即可。

@@ -1,0 +1,15 @@
+# Claude Code personal overrides
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Runtime / data
+*.db
+data/

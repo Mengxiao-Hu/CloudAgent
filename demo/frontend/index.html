@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloudAgent</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      color: #222;
+      background: #f9f9f9;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 20px 60px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 0.9rem;
+      margin-bottom: 28px;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 110px;
+      padding: 10px 12px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: vertical;
+      background: #fff;
+    }
+
+    textarea:focus {
+      outline: none;
+      border-color: #4a90d9;
+      box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.2);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 9px 22px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s;
+    }
+
+    #submitBtn {
+      background: #2563eb;
+      color: #fff;
+    }
+
+    #submitBtn:hover:not(:disabled) {
+      background: #1d4ed8;
+    }
+
+    #submitBtn:disabled {
+      background: #93b4ef;
+      cursor: not-allowed;
+    }
+
+    #resetBtn {
+      background: #e5e7eb;
+      color: #374151;
+      display: none;
+    }
+
+    #resetBtn:hover {
+      background: #d1d5db;
+    }
+
+    #statusBar {
+      margin-top: 24px;
+      padding: 10px 14px;
+      background: #f0f4ff;
+      border-left: 4px solid #4a90d9;
+      border-radius: 0 4px 4px 0;
+      font-size: 0.9rem;
+      color: #444;
+      display: none;
+    }
+
+    #statusBar.error {
+      background: #fff0f0;
+      border-left-color: #dc2626;
+      color: #b91c1c;
+    }
+
+    #resultSection {
+      margin-top: 24px;
+      display: none;
+    }
+
+    #resultSection h2 {
+      font-size: 1.1rem;
+      margin-bottom: 10px;
+    }
+
+    #resultSection h2.error-heading {
+      color: #b91c1c;
+    }
+
+    pre {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 16px;
+      border-radius: 6px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+      font-size: 0.875rem;
+      line-height: 1.55;
+      max-height: 520px;
+      overflow-y: auto;
+    }
+
+    pre.error-pre {
+      background: #fff0f0;
+      color: #b91c1c;
+      border: 1px solid #fca5a5;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>CloudAgent</h1>
+  <p class="subtitle">Autonomous code-analysis agent running in an isolated Docker sandbox.</p>
+
+  <form id="taskForm" novalidate>
+    <label for="promptInput">Task prompt</label>
+    <textarea
+      id="promptInput"
+      name="prompt"
+      placeholder="Describe what you want the agent to do..."
+    >Find all TODO and FIXME comments in the vllm repository and summarize findings in markdown.</textarea>
+
+    <div class="button-row">
+      <button type="submit" id="submitBtn">Submit Task</button>
+      <button type="button" id="resetBtn">New Task</button>
+    </div>
+  </form>
+
+  <div id="statusBar" role="status" aria-live="polite"></div>
+
+  <div id="progressSection" style="display:none; margin-top: 16px;">
+    <div id="planLine" style="font-size:0.85rem; color:#555; margin-bottom:4px;"></div>
+    <div id="thoughtLine" style="font-size:0.9rem; color:#333; font-style:italic; background:#f5f5f5; padding:8px 12px; border-radius:4px; border-left:3px solid #4a90d9;"></div>
+  </div>
+
+  <div id="resultSection">
+    <h2 id="resultHeading">Result</h2>
+    <pre id="resultPre"></pre>
+  </div>
+
+  <script>
+    "use strict";
+
+    /* ------------------------------------------------------------------ */
+    /*  DOM refs                                                             */
+    /* ------------------------------------------------------------------ */
+    const form        = document.getElementById("taskForm");
+    const promptInput = document.getElementById("promptInput");
+    const submitBtn   = document.getElementById("submitBtn");
+    const resetBtn    = document.getElementById("resetBtn");
+    const statusBar   = document.getElementById("statusBar");
+    const resultSect  = document.getElementById("resultSection");
+    const resultHead  = document.getElementById("resultHeading");
+    const resultPre   = document.getElementById("resultPre");
+
+    /* ------------------------------------------------------------------ */
+    /*  State                                                                */
+    /* ------------------------------------------------------------------ */
+    let pollTimer  = null;
+    let taskId     = null;
+
+    /* ------------------------------------------------------------------ */
+    /*  Security helper — HTML-escape before inserting text into DOM        */
+    /* ------------------------------------------------------------------ */
+    function escapeHtml(raw) {
+      const node = document.createElement("span");
+      node.textContent = (raw == null) ? "" : String(raw);
+      return node.innerHTML;
+    }
+
+    /* Safe text node setter — avoids innerHTML with raw data entirely */
+    function setTextContent(el, text) {
+      el.textContent = (text == null) ? "" : String(text);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  UI state helpers                                                     */
+    /* ------------------------------------------------------------------ */
+    function showStatus(message, isError) {
+      statusBar.style.display = "block";
+      statusBar.className = isError ? "error" : "";
+      setTextContent(statusBar, message);
+    }
+
+    function hideStatus() {
+      statusBar.style.display = "none";
+      statusBar.textContent = "";
+    }
+
+    function showResult(text, isError) {
+      resultSect.style.display = "block";
+
+      if (isError) {
+        resultHead.className = "error-heading";
+        setTextContent(resultHead, "Error");
+        resultPre.className = "error-pre";
+      } else {
+        resultHead.className = "";
+        setTextContent(resultHead, "Result");
+        resultPre.className = "";
+      }
+
+      setTextContent(resultPre, text);
+    }
+
+    function setRunning(running) {
+      submitBtn.disabled = running;
+      resetBtn.style.display = running ? "none" : "inline-block";
+      promptInput.readOnly = running;
+    }
+
+    function resetUI() {
+      stopPolling();
+      taskId = null;
+
+      setRunning(false);
+      resetBtn.style.display = "none";
+      hideStatus();
+      document.getElementById("progressSection").style.display = "none";
+
+      resultSect.style.display = "none";
+      setTextContent(resultPre, "");
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Polling                                                              */
+    /* ------------------------------------------------------------------ */
+    function stopPolling() {
+      if (pollTimer !== null) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    async function pollTask() {
+      let response;
+      try {
+        response = await fetch("/api/tasks/" + encodeURIComponent(taskId));
+      } catch (networkErr) {
+        showStatus("Network error while polling: " + networkErr.message, true);
+        return;
+      }
+
+      if (!response.ok) {
+        showStatus("Server error " + response.status + " while polling task.", true);
+        stopPolling();
+        setRunning(false);
+        return;
+      }
+
+      let task;
+      try {
+        task = await response.json();
+      } catch (parseErr) {
+        showStatus("Invalid response from server.", true);
+        stopPolling();
+        setRunning(false);
+        return;
+      }
+
+      const status    = task.status    || "unknown";
+      const iteration = task.iteration != null ? task.iteration : 0;
+
+      if (status === "queued") {
+        showStatus("Status: queued — waiting to start...", false);
+
+      } else if (status === "running") {
+        showStatus("Status: running", false);
+
+        const progressSection = document.getElementById("progressSection");
+        const planLine = document.getElementById("planLine");
+        const thoughtLine = document.getElementById("thoughtLine");
+
+        progressSection.style.display = "block";
+
+        // Show plan (iteration counter)
+        const planText = task.plan
+          ? task.plan
+          : ("Iteration " + iteration);
+        setTextContent(planLine, planText);
+
+        // Show thought (LLM reasoning)
+        if (task.thought) {
+          setTextContent(thoughtLine, task.thought);
+          thoughtLine.style.display = "block";
+        } else {
+          thoughtLine.style.display = "none";
+        }
+
+      } else if (status === "succeeded") {
+        stopPolling();
+        setRunning(false);
+        hideStatus();
+        document.getElementById("progressSection").style.display = "none";
+        showResult(task.result || "(no output)", false);
+
+      } else if (status === "failed") {
+        stopPolling();
+        setRunning(false);
+        document.getElementById("progressSection").style.display = "none";
+        showStatus("Task failed.", true);
+        showResult(task.error || "Unknown error.", true);
+
+      } else {
+        showStatus("Status: " + status + " (iteration " + iteration + ")", false);
+      }
+    }
+
+    function startPolling() {
+      pollTask();                               // immediate first check
+      pollTimer = setInterval(pollTask, 2000);  // then every 2 seconds
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Submit handler                                                       */
+    /* ------------------------------------------------------------------ */
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+
+      const prompt = promptInput.value.trim();
+      if (!prompt) {
+        showStatus("Please enter a task prompt before submitting.", true);
+        promptInput.focus();
+        return;
+      }
+
+      // Lock UI before async work
+      setRunning(true);
+      resetBtn.style.display = "none";
+      hideStatus();
+      resultSect.style.display = "none";
+      taskId = null;
+
+      let postResponse;
+      try {
+        postResponse = await fetch("/api/tasks", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ prompt: prompt })
+        });
+      } catch (networkErr) {
+        showStatus("Could not reach server: " + networkErr.message, true);
+        setRunning(false);
+        return;
+      }
+
+      if (!postResponse.ok) {
+        let detail = "";
+        try {
+          const body = await postResponse.json();
+          detail = body.detail || body.error || "";
+        } catch (_) { /* ignore parse error */ }
+        showStatus(
+          "Submission failed (HTTP " + postResponse.status + ")" +
+          (detail ? ": " + detail : "."),
+          true
+        );
+        setRunning(false);
+        return;
+      }
+
+      let created;
+      try {
+        created = await postResponse.json();
+      } catch (_) {
+        showStatus("Server returned an invalid response.", true);
+        setRunning(false);
+        return;
+      }
+
+      taskId = created.id;
+      if (!taskId) {
+        showStatus("Server did not return a task ID.", true);
+        setRunning(false);
+        return;
+      }
+
+      showStatus("Task submitted (id: " + taskId + ") — polling for updates...", false);
+      startPolling();
+    });
+
+    /* ------------------------------------------------------------------ */
+    /*  Reset / New task button                                              */
+    /* ------------------------------------------------------------------ */
+    resetBtn.addEventListener("click", function () {
+      resetUI();
+      promptInput.focus();
+    });
+  </script>
+
+</body>
+</html>
