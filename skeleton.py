@@ -1,149 +1,199 @@
 """
-云端 Agent 平台 — 框架骨架(伪代码)
-================================================
-四个设计关注点不单独成章,而是标注在它们自然出现的位置:
-  [编排] Agent 编排与调度      [沙箱] 沙箱与隔离执行
-  [LLM]  LLM 集成与工具调用    [架构] 整体架构与可扩展性(接口缝)
-设计依据来自对 Devin 行为的观察(见文件末尾的 trace 对照)。
+CloudAgent — architecture skeleton (pseudocode reference)
+
+Four design pillars are annotated where they naturally appear:
+  [orchestration]  agent scheduling and task lifecycle
+  [sandbox]        isolated execution environment
+  [llm]            LLM integration and tool-calling loop
+  [architecture]   protocol seams that make each axis swappable
+
+Binding spec: .claude/docs/SPECS.md
+This file is a reference sketch — implementations in demo/ may simplify.
 """
 
 from typing import Protocol
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-MAX_ITERS = 50  # 全局兜底之一
+MAX_ITERATIONS = 50
+
 
 # ============================================================
-# [架构] 接口缝:每个"变化轴"一个接口,核心循环不依赖具体实现。
-#        换模型 / 加工具 / 换隔离后端,都不动 run_agent()。
+# [architecture] Protocol seams: one interface per axis of change.
+# Swap model / add tool / change isolation backend without touching run_agent().
 # ============================================================
 
-class LLMProvider(Protocol):                       # 变化轴:模型
-    def complete(self, messages, tool_schemas) -> "LLMResponse": ...
+class LLMProvider(Protocol):
+    def complete(self, messages: list[dict], tool_schemas: list[dict]) -> dict:
+        # Returns {"is_final": bool, "is_error": bool, "text": str, "tool_calls": [...]}
+        ...
 
-class Tool(Protocol):                              # 变化轴:能力
+
+class Tool(Protocol):
     name: str
-    schema: dict                                   # 给 LLM 看的 JSON schema
-    def run(self, args: dict, sbx: "Sandbox") -> "ToolResult": ...
-    #                          ^ 关键:工具在沙箱里执行,不在 worker 进程里
+    description: str
+    schema: dict  # JSON schema shown to the LLM
 
-class Sandbox(Protocol):                           # 变化轴:隔离强度
-    def exec(self, cmd: str, timeout: int) -> "ExecResult": ...
-    def read(self, path: str, line_range=None) -> str: ...   # 支持范围读
-    def write(self, path: str, content: str): ...
-    def destroy(self): ...
+    def run(self, args: dict, sandbox: "Sandbox") -> dict:
+        # Tools execute inside the sandbox, not on the worker host.
+        # Returns {"success": bool, "output": str, "error": str | None}
+        ...
+
+
+class Sandbox(Protocol):
+    def exec(self, cmd: str, timeout: int) -> dict: ...   # {"returncode", "stdout", "stderr"}
+    def read(self, path: str, line_range=None) -> str: ... # optional (start, end) line range
+    def write(self, path: str, content: str) -> dict: ...
+    def destroy(self) -> None: ...
+
 
 # ============================================================
-# [沙箱] 一次性隔离环境。demo 用 Docker;生产换 Firecracker microVM
-#        只需实现同一个 Sandbox 接口(这就是上面接口缝的意义)。
+# [sandbox] Ephemeral isolation. Demo uses Docker; swap to Firecracker
+# by implementing the same Sandbox protocol.
+# Key constraints:
+#   - vllm repo mounted read-only from a named Docker volume (pre-cloned once)
+#   - LLM API key stays in the worker process; never injected into the container
+#   - Write access restricted to /workspace/out/
 # ============================================================
 class DockerSandbox:
     @classmethod
     def create(cls, task) -> "DockerSandbox":
-        # - 一次性容器,非 root,丢弃 capabilities,seccomp
-        # - 资源限额(CPU/内存/PID/磁盘):防 fork 炸弹拖垮节点
-        # - 不挂载宿主目录
-        # - 网络 = 默认拒绝 + 白名单(git host、PyPI/npm)
-        #     ^ 编码 agent 必须能 pip install / git push,不能全禁
-        # - 注入【短时效 + 仓库范围受限 + 权限位受限】的 GitHub App token
-        #     ^ token 必须进沙箱(clone 在此发生),靠"做弱"而非隔离兜底
-        #     ^ 注意:LLM key 不在这里!LLM 调用发生在可信 worker 里
+        # - Ephemeral container (tail -f /dev/null to stay alive for exec_run)
+        # - Resource limits: mem_limit=2g, nano_cpus=1e9
+        # - Mount named volume cloudagent-vllm-repo → /workspace/repo (read-only)
+        # - network_mode=bridge (outbound allowed; agent does not need to push)
         ...
 
-# ============================================================
-# [编排] 任务是队列里的工作单元;计划(Plan)是可持久化、可恢复的状态。
-# ============================================================
-@dataclass
-class Step:
-    desc: str
-    done: bool = False
+    def destroy(self) -> None:
+        # container.stop() + container.remove(force=True)
+        ...
 
-@dataclass
-class Plan:                                        # 对应 Devin "Created N Tasks"
-    steps: list[Step] = field(default_factory=list)
-    def progress(self) -> str:                     # -> "4/12"
-        return f"{sum(s.done for s in self.steps)}/{len(self.steps)}"
 
+# ============================================================
+# [orchestration] Task is the unit of work in the queue.
+# ============================================================
 @dataclass
 class Task:
     id: str
-    tenant_id: str
     prompt: str
-    policy: dict                                   # [权限] 默认拒绝的能力白名单
-    status: str = "queued"
-    plan: Plan = None
+    status: str = "queued"   # queued | running | succeeded | failed
+    iteration: int = 0
+    thought: str | None = None  # live LLM reasoning (set each iteration)
+    plan: str | None = None     # current step description
+    result: str | None = None
+    error: str | None = None
 
-# ---- API 层:无状态,只做鉴权/校验/入队/读回 ----
-def POST_tasks(prompt, policy_override, tenant):
-    task = Task(id=new_id(), tenant_id=tenant, prompt=prompt,
-                policy=resolve_policy(policy_override))
-    persist(task); queue.enqueue(task.id)
-    return task.id                                 # 异步:立即返回,不阻塞
 
-# ---- [编排] Worker:无状态,从队列取任务。多开 worker = 水平扩展 ----
-def worker_loop():
-    while (task_id := queue.dequeue()) is not None:
-        task = load(task_id); set_status(task, "running")
-        sbx = DockerSandbox.create(task)           # [沙箱] 起隔离环境
+# ---- API layer: stateless, enqueue and read back ----
+def POST_api_tasks(prompt: str) -> str:
+    task = Task(id=new_id(), prompt=prompt)
+    store.tasks[task.id] = task
+    queue.enqueue(task.id)
+    return task.id  # async: returns immediately
+
+
+# ---- [orchestration] Worker: pulls tasks, runs agent, updates state ----
+def worker_loop(queue, sandbox_factory, llm) -> None:
+    while True:
+        task_id = queue.dequeue(timeout=1)
+        task = store.tasks[task_id]
+        task.status = "running"
+        sandbox = sandbox_factory.create(task)
         try:
-            clone_repo_into(sbx, task)             # token 在沙箱内,但受限
-            run_agent(task, sbx)
-            set_status(task, "succeeded")
-        except (Timeout, BudgetExceeded, ToolError) as e:
-            set_status(task, e.terminal_status)
+            result = run_agent(task, sandbox, llm)
+            task.status = result["status"]
+            if result["status"] == "failed":
+                task.error = result["output"]
+            else:
+                task.result = result["output"]
+        except Exception as exc:
+            task.status = "failed"
+            task.error = str(exc)
         finally:
-            sbx.destroy()                          # [沙箱] 用完即销毁,无残留
+            sandbox.destroy()
+
 
 # ============================================================
-# [LLM] + [编排] 核心循环:先规划,再 observe→think→act,最后 report。
+# [llm] + [orchestration] Core agent loop: observe → think → act.
 # ============================================================
-def run_agent(task: Task, sbx: Sandbox):
-    task.plan = planner_decompose(llm, task.prompt)  # Devin:先建 todo list
-    persist(task)                                    # [编排] 计划即可恢复状态
-    history = [system_prompt(), user(task.prompt)]
+async def run_agent(task: Task, sandbox: Sandbox, llm: LLMProvider) -> dict:
+    history = [
+        {"role": "system", "content": system_prompt()},
+        {"role": "user",   "content": task.prompt},
+    ]
 
-    for _ in range(MAX_ITERS):
-        guard_budget(task)                           # 兜底:迭代/token/墙钟超时
-        resp = llm.complete(history, registry.schemas())   # think
+    for iteration in range(MAX_ITERATIONS):
+        guard_budget(task)                           # wall-clock + iteration limit
 
-        if resp.is_final:                            # act = 回复用户
-            report_to_user(task, resp.text)          # Devin 末尾的 findings
-            return
+        history = trim_history(history)              # keep context within token limit
+        response = llm.complete(history, tool_registry.schemas())
 
-        for call in resp.tool_calls:                 # act = 调工具
-            check_policy(task.policy, call)          # [权限] default-deny 校验
-            result = registry[call.name].run(call.args, sbx)  # 在沙箱执行
-            history.append(observe(result))          # observe(含报错→下轮自我纠正)
+        if response.get("is_error"):
+            return {"status": "failed", "output": response["text"]}
 
-        task.plan = sync_plan(task.plan, history)    # 更新进度 k/n
-        persist(task)                                # [编排] 每步持久化→可恢复
+        tool_calls = response.get("tool_calls") or []
+
+        if response.get("is_final") and not tool_calls:
+            return {"status": "succeeded", "output": response["text"]}
+
+        # Update visible progress before tools run so the UI reflects the current step.
+        task.iteration = iteration + 1
+        task.thought = f"Iteration {iteration + 1}: calling {', '.join(tc['name'] for tc in tool_calls)}"
+
+        for call in tool_calls:
+            tool = tool_registry.get(call["name"])
+            result = tool.run(call["arguments"], sandbox)
+
+            if result.get("is_final"):               # finish() tool short-circuits
+                return {"status": "succeeded", "output": result["output"]}
+
+            # Truncate large outputs before adding to history to stay within context limit.
+            if len(result.get("output", "")) > MAX_TOOL_OUTPUT_CHARS:
+                result["output"] = result["output"][:MAX_TOOL_OUTPUT_CHARS] + " [...truncated]"
+
+            # Use "user" role so the model treats tool results as environment
+            # observations, not its own prior output.
+            history.append({
+                "role": "user",
+                "content": f"Tool result for {call['name']}: {result}",
+            })
+
+    return {"status": "failed", "output": "Max iterations reached."}
+
 
 # ============================================================
-# [架构] 工具都是 Sandbox 之上的薄封装;装饰器注册只是"加工具"这条缝的实现。
+# [architecture] Tools are thin wrappers over the Sandbox interface.
 # ============================================================
-@registry.register
-class Shell:                                        # git / gh / pip 全走这里
-    schema = {...}
-    def run(self, args, sbx): return sbx.exec(args["cmd"], timeout=60)
+class ReadFileTool:
+    name = "read"
+    def run(self, args, sandbox):
+        return sandbox.read(args["path"], args.get("line_range"))
 
-@registry.register
-class ReadFile:
-    def run(self, args, sbx):
-        return sbx.read(args["path"], args.get("range"))  # 范围读→控制上下文
+class WriteFileTool:
+    name = "write"
+    def run(self, args, sandbox):
+        # Writes restricted to /workspace/out/ — source files are read-only.
+        return sandbox.write(args["path"], args["content"])
 
-@registry.register
-class WriteFile:
-    def run(self, args, sbx): return sbx.write(args["path"], args["content"])
+class ShellTool:
+    name = "shell"
+    def run(self, args, sandbox):
+        # Allow-list: grep, rg, find, wc, cat, head, ls, git log/status/show/diff
+        # Reject: pip install, npm, cargo build, git push, curl, wget
+        return sandbox.exec(args["command"], timeout=60)
 
-# (EditFile 同理:读区间→替换→写回,对应 Devin 的 "Edited ...+3−4")
+class FinishTool:
+    name = "finish"
+    def run(self, args, sandbox):
+        return {"success": True, "output": args["output"], "is_final": True}
+
 
 # ============================================================
-# Devin trace 对照(说明骨架的每个部分对应到可观测行为):
-#   "On it. I'll clone..."        -> planner_decompose + report_to_user
-#   "Created 4/10 Tasks", "4/12"  -> Plan / Step / progress()
-#   "Thought for Xs"              -> llm.complete(...) 的 think
-#   "cd .. && git clone"          -> Shell.run -> sbx.exec(在 /home/ubuntu)
-#   "Read file.py:36-65"          -> ReadFile(range) -> 上下文控制
-#   "Created/Edited test_*.py"    -> WriteFile / EditFile
-#   pip install 失败→装包→重跑      -> observe 报错→下轮 think 自我纠正
-#   "git push" + 开 PR            -> Shell + 受限 GitHub App token
+# Devin trace → skeleton mapping (what each part corresponds to):
+#   "On it. I'll clone..."           → worker_loop sandbox setup
+#   "Thought for Xs"                 → llm.complete() think step
+#   "Read file.py:36-65"             → ReadFileTool(line_range) — context control
+#   "Searching for TODO..."          → ShellTool → sandbox.exec("rg ...")
+#   "Created report.md"              → WriteFileTool → sandbox.write(...)
+#   pip error → retry with fix       → observe result → next think (self-correction)
+#   Final summary in chat            → FinishTool → task.result
 # ============================================================
