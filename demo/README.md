@@ -33,8 +33,8 @@ source scripts/load-env.sh   # sets TOGETHER_API_KEY
 
 Server starts at **http://localhost:8000**.
 
-> **First task:** the vllm repo is cloned into a Docker volume on first use (~2 min).
-> All subsequent tasks skip the clone and start in seconds.
+> **Each task** clones the vllm repo fresh into the container's ephemeral filesystem (~1-2 min).
+> The clone is destroyed with the container — no persistent volume is used.
 
 ## UI
 
@@ -108,13 +108,13 @@ No API key or Docker required:
 demo/
 ├── agent/
 │   ├── runner.py     # observe→think→act loop (MAX_ITERATIONS=50, 10-min budget)
-│   ├── llm.py        # LangChainProvider wrapping Together AI
+│   ├── llm.py        # LangChainProvider wrapping Together AI; FileCallbackHandler middleware
 │   ├── tools.py      # ReadFile, WriteFile, Shell (allow-list), Finish
 │   └── prompts.py    # system prompt: tool descriptions + search strategy
 ├── app/
 │   ├── main.py       # FastAPI: POST /api/tasks, GET /api/tasks/{id}, GET /
 │   ├── worker.py     # daemon thread: dequeue → sandbox → run_agent → update task
-│   ├── sandbox.py    # DockerSandbox: named volume + exec/read/write/destroy
+│   ├── sandbox.py    # DockerSandbox: ephemeral container + exec/read/write/destroy
 │   ├── models.py     # Task dataclass (id, status, iteration, thought, plan, ...)
 │   └── store.py      # in-memory dict + deque queue
 ├── frontend/
