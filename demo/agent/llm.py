@@ -10,18 +10,24 @@ from __future__ import annotations
 
 import os
 
+from langchain_core.callbacks import FileCallbackHandler
+from langchain_core.runnables import RunnableConfig
+
 # langchain_openai is a worker-process dependency only. Import lazily inside
 # __init__ so this module can be imported (e.g. for tests with a fake provider)
 # even when the package is not installed.
 
 MODEL = "Qwen/Qwen2.5-7B-Instruct-Turbo"
 BASE_URL = "https://api.together.xyz/v1"
+DEFAULT_LOG_PATH = "/tmp/cloudagent_llm.log"
 
 
 class LangChainProvider:
     """LLMProvider implementation backed by LangChain + Together AI.
 
     complete(messages, tools) -> {"is_final": bool, "text": str, "tool_calls": [...]}
+
+    Each call is logged via FileCallbackHandler to `log_path` (middleware).
     """
 
     def __init__(
@@ -31,6 +37,7 @@ class LangChainProvider:
         base_url: str = BASE_URL,
         temperature: float = 0.7,
         timeout: int = 30,
+        log_path: str = DEFAULT_LOG_PATH,
     ):
         api_key = api_key or os.environ.get("TOGETHER_API_KEY")
         if not api_key:
@@ -48,6 +55,7 @@ class LangChainProvider:
             ) from exc
 
         self.model = model
+        self.log_path = log_path
         self.llm = ChatOpenAI(
             model=model,
             base_url=base_url,
@@ -64,18 +72,21 @@ class LangChainProvider:
           - no tool calls       -> {"is_final": True, "text": <content>, "tool_calls": []}
 
         Each tool_call is {"name": str, "arguments": dict}.
+        Each invocation is logged to self.log_path via FileCallbackHandler.
         """
         llm_with_tools = self.llm.bind_tools(tools) if tools else self.llm
 
-        try:
-            response = llm_with_tools.invoke(messages)
-        except Exception as exc:  # surface as a final error rather than crashing the loop
-            return {
-                "is_final": True,
-                "is_error": True,
-                "text": f"LLM call failed: {exc}",
-                "tool_calls": [],
-            }
+        with FileCallbackHandler(self.log_path) as log_handler:
+            config = RunnableConfig(callbacks=[log_handler])
+            try:
+                response = llm_with_tools.invoke(messages, config=config)
+            except Exception as exc:  # surface as a final error rather than crashing the loop
+                return {
+                    "is_final": True,
+                    "is_error": True,
+                    "text": f"LLM call failed: {exc}",
+                    "tool_calls": [],
+                }
 
         tool_calls = getattr(response, "tool_calls", None) or []
         if tool_calls:

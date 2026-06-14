@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 _SANDBOX_IMAGE = "cloudagent-sandbox:latest"
 _DEFAULT_EXEC_TIMEOUT = 60  # seconds
-_REPO_VOLUME = "cloudagent-vllm-repo"  # named Docker volume; pre-populated once
+_VLLM_CLONE_CMD = (
+    "git clone --depth 1 https://github.com/vllm-project/vllm /workspace/repo"
+)
 
 
 class DockerSandbox:
@@ -25,6 +27,10 @@ class DockerSandbox:
 
     Implements the Sandbox protocol defined in SPECS.md § 1.3 and § 4.
     One instance corresponds to exactly one running container.
+
+    The vllm repo is cloned fresh into the container's writable layer on
+    each task start — no long-lived named volume is used. The clone is
+    destroyed automatically when the container is removed.
     """
 
     def __init__(self, container) -> None:
@@ -39,49 +45,12 @@ class DockerSandbox:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _ensure_repo_volume(cls, client) -> None:
-        """
-        Populate the named volume with a shallow vllm clone the first time.
-        Subsequent calls are a no-op (checks for /workspace/repo/.git).
-        """
-        try:
-            client.volumes.get(_REPO_VOLUME)
-        except docker.errors.NotFound:
-            client.volumes.create(_REPO_VOLUME)
-
-        # Spin up a temporary container to check / clone into the volume.
-        probe = client.containers.run(
-            image=_SANDBOX_IMAGE,
-            detach=True,
-            command="tail -f /dev/null",
-            volumes={_REPO_VOLUME: {"bind": "/workspace/repo", "mode": "rw"}},
-            network_mode="bridge",
-        )
-        try:
-            # Only clone if the repo isn't already there.
-            check = probe.exec_run(
-                ["test", "-d", "/workspace/repo/.git"], demux=False
-            )
-            if check.exit_code != 0:
-                logger.info("Pre-populating vllm repo volume (one-time clone)...")
-                probe.exec_run(
-                    ["/bin/sh", "-c",
-                     "git clone --depth 1 https://github.com/vllm-project/vllm"
-                     " /workspace/repo"],
-                    demux=False,
-                )
-                logger.info("Repo volume ready.")
-        finally:
-            probe.stop(timeout=5)
-            probe.remove(force=True)
-
-    @classmethod
     def create(cls, task: "Task") -> "DockerSandbox":
         """
-        Start a new sandbox container for *task*.
+        Start a new sandbox container for *task* and clone the vllm repo.
 
-        The vllm repo is mounted from a named Docker volume (populated once
-        on first use) so tasks skip the 2-3 minute clone wait.
+        The repo is cloned into the container's ephemeral writable layer
+        (no named volume). It is destroyed when the container is removed.
 
         Resource limits follow SPECS.md § 4.2:
           - mem_limit: 2 GB
@@ -89,7 +58,6 @@ class DockerSandbox:
           - network_mode: bridge
         """
         client = docker.from_env()
-        cls._ensure_repo_volume(client)
         container = client.containers.run(
             image=_SANDBOX_IMAGE,
             detach=True,
@@ -99,10 +67,14 @@ class DockerSandbox:
             mem_limit="2g",
             nano_cpus=int(1.0 * 1e9),  # docker-py uses nano_cpus; 1.0 CPU = 1e9
             network_mode="bridge",
-            volumes={_REPO_VOLUME: {"bind": "/workspace/repo", "mode": "ro"}},
             command="tail -f /dev/null",
         )
         logger.info("Sandbox container %s started for task %s", container.short_id, task.id)
+
+        logger.info("Cloning vllm repo into sandbox %s (ephemeral)...", container.short_id)
+        container.exec_run(["/bin/sh", "-c", _VLLM_CLONE_CMD], demux=False)
+        logger.info("Repo clone complete for sandbox %s.", container.short_id)
+
         return cls(container)
 
     # ------------------------------------------------------------------
