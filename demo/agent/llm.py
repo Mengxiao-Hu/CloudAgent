@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 
-from langchain_core.callbacks import FileCallbackHandler
+from langchain_core.callbacks import BaseCallbackHandler, FileCallbackHandler
 from langchain_core.runnables import RunnableConfig
+
+from .middleware import BudgetExceeded
 
 # langchain_openai is a worker-process dependency only. Import lazily inside
 # __init__ so this module can be imported (e.g. for tests with a fake provider)
@@ -64,7 +66,12 @@ class LangChainProvider:
             timeout=timeout,
         )
 
-    def complete(self, messages: list[dict], tools: list[dict]) -> dict:
+    def complete(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        extra_callbacks: list[BaseCallbackHandler] | None = None,
+    ) -> dict:
         """Bind tools, invoke the model, and parse the response.
 
         Returns a normalized dict:
@@ -72,14 +79,19 @@ class LangChainProvider:
           - no tool calls       -> {"is_final": True, "text": <content>, "tool_calls": []}
 
         Each tool_call is {"name": str, "arguments": dict}.
-        Each invocation is logged to self.log_path via FileCallbackHandler.
+        Each invocation is logged via FileCallbackHandler (middleware).
+        extra_callbacks (e.g. BudgetGuardMiddleware) are merged into the same
+        RunnableConfig so they fire on the same LLM call.
         """
         llm_with_tools = self.llm.bind_tools(tools) if tools else self.llm
+        callbacks = [*(extra_callbacks or [])]
 
         with FileCallbackHandler(self.log_path) as log_handler:
-            config = RunnableConfig(callbacks=[log_handler])
+            config = RunnableConfig(callbacks=[log_handler, *callbacks])
             try:
                 response = llm_with_tools.invoke(messages, config=config)
+            except BudgetExceeded:
+                raise  # propagate to runner; not an LLM error
             except Exception as exc:  # surface as a final error rather than crashing the loop
                 return {
                     "is_final": True,

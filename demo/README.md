@@ -107,8 +107,9 @@ No API key or Docker required:
 ```
 demo/
 ├── agent/
-│   ├── runner.py     # observe→think→act loop (MAX_ITERATIONS=50, 10-min budget)
-│   ├── llm.py        # LangChainProvider wrapping Together AI; FileCallbackHandler middleware
+│   ├── runner.py     # observe→think→act loop (MAX_ITERATIONS=50)
+│   ├── middleware.py # BudgetGuardMiddleware, TrimHistoryMiddleware, CapOutputMiddleware
+│   ├── llm.py        # LangChainProvider; FileCallbackHandler + extra_callbacks
 │   ├── tools.py      # ReadFile, WriteFile, Shell (allow-list), Finish
 │   └── prompts.py    # system prompt: tool descriptions + search strategy
 ├── app/

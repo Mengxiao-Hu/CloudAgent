@@ -4,11 +4,18 @@ Public surface:
   - run_agent: the observe -> think -> act loop.
   - LangChainProvider: Together AI + Qwen LLM provider.
   - ToolRegistry: holds the read/write/shell/finish tools.
+  - Middleware: BudgetGuardMiddleware, TrimHistoryMiddleware, CapOutputMiddleware.
 """
 
 from .llm import LangChainProvider
+from .middleware import (
+    BudgetExceeded,
+    BudgetGuardMiddleware,
+    CapOutputMiddleware,
+    TrimHistoryMiddleware,
+)
 from .prompts import system_prompt
-from .runner import guard_budget, run_agent
+from .runner import run_agent
 from .tools import (
     FinishTool,
     ReadFileTool,
@@ -21,7 +28,6 @@ from .tools import (
 
 __all__ = [
     "run_agent",
-    "guard_budget",
     "LangChainProvider",
     "ToolRegistry",
     "default_registry",
@@ -31,4 +37,8 @@ __all__ = [
     "ShellTool",
     "FinishTool",
     "system_prompt",
+    "BudgetGuardMiddleware",
+    "BudgetExceeded",
+    "TrimHistoryMiddleware",
+    "CapOutputMiddleware",
 ]

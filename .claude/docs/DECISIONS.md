@@ -55,7 +55,7 @@ Full root cause documented in `.claude/docs/AGENT_RUNTIME.md` (§ Root cause).
 - status: succeeded, iteration: 5, result: 1689-char markdown TODO/FIXME summary
 - No 422, no stuck iteration, thought field showed live LLM reasoning during polling
 
-### 2026-06-13 — LangChain middleware refactor + ephemeral vllm clone
+### 2026-06-13 — LangChain middleware refactor: middleware.py + ephemeral vllm clone
 
 1. **Removed long-lived named Docker volume** (`cloudagent-vllm-repo`). The vllm
    repo is now cloned directly into each container's ephemeral writable layer inside
@@ -63,11 +63,16 @@ Full root cause documented in `.claude/docs/AGENT_RUNTIME.md` (§ Root cause).
    persists between tasks. Trade-off: each task pays the clone cost (~1-2 min);
    no shared cache. Chosen to avoid volume lifecycle complexity and stale state.
 
-2. **`FileCallbackHandler` as LangChain middleware.** `LangChainProvider.complete()`
-   now passes a `FileCallbackHandler` (from `langchain_core.callbacks`) via
-   `RunnableConfig` on every `invoke` call, logging chain events to
-   `/tmp/cloudagent_llm.log`. Handler is used as a context manager per call.
-   Adds a `log_path` constructor param (default `/tmp/cloudagent_llm.log`).
+2. **`agent/middleware.py` — LangChain middleware module.** Extracted three
+   hand-written runner functions into proper LangChain middleware:
+   - `BudgetGuardMiddleware(BaseCallbackHandler)` — fires on `on_chat_model_start`
+     to raise `BudgetExceeded` before the LLM call; replaces `guard_budget()`.
+   - `TrimHistoryMiddleware = RunnableLambda(_trim_history)` — caps history to 20
+     messages before each LLM call; replaces inline `_trim_history()`.
+   - `CapOutputMiddleware = RunnableLambda(_cap_output)` — caps tool output to
+     4000 chars before it enters history; replaces inline truncation loop.
+   `llm.complete()` now accepts `extra_callbacks` (merged with `FileCallbackHandler`
+   into `RunnableConfig`) so `BudgetGuardMiddleware` fires on every LLM invoke.
 
 ### Scope decisions
 

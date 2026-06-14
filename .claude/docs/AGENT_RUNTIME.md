@@ -8,11 +8,12 @@ the code is more specific than, or intentionally diverges from, those sections.
 
 | File | Contract |
 |------|----------|
-| `agent/llm.py` | `LangChainProvider` ��� Together AI + Qwen behind `LLMProvider`. |
+| `agent/llm.py` | `LangChainProvider` — Together AI + Qwen behind `LLMProvider`. `complete(messages, tools, extra_callbacks)`. |
+| `agent/middleware.py` | `BudgetGuardMiddleware` (callback), `TrimHistoryMiddleware` / `CapOutputMiddleware` (RunnableLambda). |
 | `agent/tools.py` | `Tool` protocol, `ReadFileTool`/`WriteFileTool`/`ShellTool`/`FinishTool`, `ToolRegistry`. |
 | `agent/prompts.py` | `system_prompt()`. |
-| `agent/runner.py` | `run_agent(task, sandbox, llm, tool_registry=None)`, `guard_budget()`. |
-| `agent/__init__.py` | Exports `run_agent`, `LangChainProvider`, `ToolRegistry`, tools, `system_prompt`. |
+| `agent/runner.py` | `run_agent(task, sandbox, llm, tool_registry=None)`. Composes middleware from `middleware.py`. |
+| `agent/__init__.py` | Exports `run_agent`, `LangChainProvider`, `ToolRegistry`, tools, middleware, `system_prompt`. |
 
 ## Conformance to SPECS.md
 
@@ -59,12 +60,14 @@ the code is more specific than, or intentionally diverges from, those sections.
    `/workspace` and rejects any normalized path outside `/workspace/out/`,
    protecting source files.
 
-6. **`guard_budget` enforces the 5-minute task limit** (§ 6.2). It prefers the
-   task's `started_at` (epoch or `datetime`) and falls back to the loop's
-   `time.monotonic()` start when absent, raising `BudgetExceeded`, which the
-   loop converts to `{"status": "failed", ...}`. Note: this is a wall-clock
-   guard checked once per iteration; the worker's own timeout (§ 3.3) remains
-   the hard backstop.
+6. **`BudgetGuardMiddleware` enforces the 10-minute task limit** (§ 6.2).
+   Replaces the former standalone `guard_budget()` function. The middleware is
+   a `BaseCallbackHandler` subclass passed via `extra_callbacks` to
+   `llm.complete()`. It fires on both `on_llm_start` and `on_chat_model_start`
+   (the latter is what `ChatOpenAI` triggers), raising `BudgetExceeded` which
+   propagates out of `llm.complete()` and is caught by `run_agent` as
+   `{"status": "failed", ...}`. The worker's own 11-minute wall-clock timeout
+   (§ 3.3) remains the hard backstop.
 
 7. **`task` and `sandbox` are duck-typed.** Per ROLE_CONTRACTS, the `Task`
    dataclass and `Sandbox` are owned by backend-developer. `run_agent` reads
@@ -83,22 +86,23 @@ the code is more specific than, or intentionally diverges from, those sections.
    so the package and tests import without the dependency installed; a missing
    key or missing package raises a clear `RuntimeError`.
 
-14. **`FileCallbackHandler` as LLM middleware.** Every `llm.complete()` call wraps
-    `llm_with_tools.invoke(messages, config=RunnableConfig(callbacks=[handler]))`
-    inside `with FileCallbackHandler(self.log_path) as handler:`. This logs chain
-    entry/exit and tool events to `/tmp/cloudagent_llm.log` (default). `log_path`
-    is a constructor parameter. The handler is opened and closed per call (context
-    manager) so no file handle leaks across iterations.
+10. **`CapOutputMiddleware` caps tool output at 4000 chars** before it enters
+    history (`agent/middleware.py`). A `RunnableLambda` wrapping `_cap_output()`.
+    Called as `CapOutputMiddleware.invoke(output)` in the observe phase. Prevents
+    context-window overflow on the next `llm.complete()` call.
 
-10. **Tool output is capped at 4000 chars before appending to history.** Large
-    shell outputs (e.g., `rg 'TODO|FIXME'` on the full vllm repo returning
-    thousands of lines) are truncated with a `\n[...truncated, N chars total]`
-    suffix. This prevents context-window overflow on the next `llm.complete()` call.
+11. **`TrimHistoryMiddleware` limits what the LLM sees to 20 messages.**
+    A `RunnableLambda` wrapping `_trim_history()`. Called as
+    `TrimHistoryMiddleware.invoke(history)` in the think phase; the full history
+    list is preserved in the runner for context, only the trimmed slice is sent
+    to `llm.complete()`.
 
-11. **Message history is trimmed to 20 messages before each LLM call.**
-    `_trim_history` keeps the first two messages (system + original prompt) plus
-    the most recent 18 messages. This bounds total context independent of tool
-    output length.
+14. **`FileCallbackHandler` + `extra_callbacks` merged in `llm.complete()`.** The
+    method accepts `extra_callbacks: list[BaseCallbackHandler] | None`; they are
+    combined with `FileCallbackHandler` into a single `RunnableConfig`. This lets
+    the runner pass `BudgetGuardMiddleware` alongside the file logger without
+    modifying `llm.py`'s internals. Log file: `/tmp/cloudagent_llm.log` (default,
+    configurable via `log_path` constructor param).
 
 12. **Iteration increments BEFORE tools run.** `_update_progress` is called as
     soon as `tool_calls` are extracted from the LLM response (line ~159 in
