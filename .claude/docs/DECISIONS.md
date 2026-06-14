@@ -55,6 +55,20 @@ Full root cause documented in `.claude/docs/AGENT_RUNTIME.md` (§ Root cause).
 - status: succeeded, iteration: 5, result: 1689-char markdown TODO/FIXME summary
 - No 422, no stuck iteration, thought field showed live LLM reasoning during polling
 
+### 2026-06-13 — LangChain middleware refactor + ephemeral vllm clone
+
+1. **Removed long-lived named Docker volume** (`cloudagent-vllm-repo`). The vllm
+   repo is now cloned directly into each container's ephemeral writable layer inside
+   `DockerSandbox.create()`. The clone is destroyed with the container — nothing
+   persists between tasks. Trade-off: each task pays the clone cost (~1-2 min);
+   no shared cache. Chosen to avoid volume lifecycle complexity and stale state.
+
+2. **`FileCallbackHandler` as LangChain middleware.** `LangChainProvider.complete()`
+   now passes a `FileCallbackHandler` (from `langchain_core.callbacks`) via
+   `RunnableConfig` on every `invoke` call, logging chain events to
+   `/tmp/cloudagent_llm.log`. Handler is used as a context manager per call.
+   Adds a `log_path` constructor param (default `/tmp/cloudagent_llm.log`).
+
 ### Scope decisions
 
 - Demo repo fixed to `vllm-project/vllm` shallow clone — no user-selectable repos (per MVP.md).

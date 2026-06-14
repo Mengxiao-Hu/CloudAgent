@@ -83,6 +83,13 @@ the code is more specific than, or intentionally diverges from, those sections.
    so the package and tests import without the dependency installed; a missing
    key or missing package raises a clear `RuntimeError`.
 
+14. **`FileCallbackHandler` as LLM middleware.** Every `llm.complete()` call wraps
+    `llm_with_tools.invoke(messages, config=RunnableConfig(callbacks=[handler]))`
+    inside `with FileCallbackHandler(self.log_path) as handler:`. This logs chain
+    entry/exit and tool events to `/tmp/cloudagent_llm.log` (default). `log_path`
+    is a constructor parameter. The handler is opened and closed per call (context
+    manager) so no file handle leaks across iterations.
+
 10. **Tool output is capped at 4000 chars before appending to history.** Large
     shell outputs (e.g., `rg 'TODO|FIXME'` on the full vllm repo returning
     thousands of lines) are truncated with a `\n[...truncated, N chars total]`

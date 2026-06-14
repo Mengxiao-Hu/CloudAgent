@@ -70,7 +70,7 @@ def worker_loop(
 
             # ----------------------------------------------------------
             # Initialise workspace
-            # Repo is mounted from named volume (pre-cloned once by sandbox).
+            # Repo is cloned into the container by sandbox.create().
             # ----------------------------------------------------------
             sandbox.exec("mkdir -p /workspace/out", timeout=10)
             task.thought = "Sandbox ready. Starting agent loop..."

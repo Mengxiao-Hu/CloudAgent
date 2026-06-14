@@ -386,11 +386,10 @@ def worker_loop(queue, sandbox_factory, llm):
         
         sandbox = None
         try:
-            # Create isolated environment
+            # Create isolated environment (vllm clone happens inside create())
             sandbox = sandbox_factory.create(task)
             
-            # Initialize repo
-            sandbox.exec("git clone --depth 1 https://github.com/vllm-project/vllm /workspace/repo", timeout=120)
+            # Ensure output directory exists
             sandbox.exec("mkdir -p /workspace/out")
             
             # Run agent
